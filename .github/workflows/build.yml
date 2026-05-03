@@ -17,6 +17,21 @@ jobs:
       contents: read
       packages: write
     steps:
+      # Imagem base whisperx + CUDA + PyTorch passa de 10GB. Runner padrão
+      # do GitHub tem ~14GB livres → estoura "No space left on device" no
+      # `docker build`. jlumbroso/free-disk-space remove SDKs pre-instalados
+      # (Android, .NET, Haskell, etc) que não usamos, libera ~30-40GB.
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - uses: actions/checkout@v4
 
       - name: Login to ghcr.io
