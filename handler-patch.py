@@ -1,33 +1,34 @@
 # ─────────────────────────────────────────────────────────────────────
-# PATCH appended ao handler.py original via Dockerfile.
+# Helper STANDALONE prepended ao handler.py via Dockerfile.
 #
-# Sobrescreve `get_audio_duration` no namespace do módulo. Como o handler()
-# só chama essa função em runtime (lookup tardio no namespace global),
-# nossa versão é a que vale quando o RunPod invoca o job.
+# Substitui a linha problemática `return float(stream['duration']) * 1000`
+# por `return _safe_get_audio_duration_ms(audio_file, stream)` (sed inline
+# no Dockerfile garante o swap).
 #
-# Bug original (upmeet/whisperx-runpod:6.2.0):
-#   File "/handler.py", line 174, in get_audio_duration
-#     return float(stream['duration']) * 1000
-#   KeyError: 'duration'
-#
-# Causa: WebM live (MediaRecorder do navegador) não escreve `Duration` no
-# header do Segment Info — encoder não sabe quando user vai parar de gravar.
-# ffprobe stream[].duration vem ausente, mas format.duration vem ok ou
-# pode ser calculado decodando.
-#
-# Estratégia em cascata (do mais barato pro mais caro):
-#   1) ffprobe `format.duration` (top-level container, geralmente presente)
-#   2) ffprobe `stream.duration` (comportamento original — mantido como fallback)
-#   3) ffmpeg decode + parse stderr "Duration:" (sempre funciona em arquivo válido)
+# Cascata de fallbacks pra arquivos sem stream.duration (caso comum: WebM
+# live do MediaRecorder do navegador):
+#   1) usa stream['duration'] se presente (comportamento original, mantido)
+#   2) ffprobe `format.duration` (top-level container)
+#   3) ffmpeg decode + parse stderr "Duration:" (último recurso)
 # ─────────────────────────────────────────────────────────────────────
 
 import json as _patch_json
 import subprocess as _patch_subprocess
 
 
-def _safe_get_audio_duration(audio_file):
+def _safe_get_audio_duration_ms(audio_file, stream):
     """Retorna duração em ms. Robusto contra arquivos sem stream.duration."""
-    # Tentativa 1: format.duration (top-level do container, mais confiável)
+    # Tentativa 1: comportamento original (stream.duration) — funciona pra
+    # MP3, WAV, MP4 com header completo
+    try:
+        d = stream.get('duration')
+        if d is not None:
+            return float(d) * 1000
+    except Exception as e:
+        print(f'[patch] stream.duration falhou: {e}')
+
+    # Tentativa 2: format.duration (top-level do container, geralmente
+    # presente mesmo quando stream.duration falta)
     try:
         r = _patch_subprocess.run(
             ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
@@ -39,20 +40,6 @@ def _safe_get_audio_duration(audio_file):
             return float(d) * 1000
     except Exception as e:
         print(f'[patch] ffprobe format.duration falhou: {e}')
-
-    # Tentativa 2: ffprobe stream.duration (comportamento original do upmeet)
-    try:
-        r = _patch_subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'stream=duration',
-             '-of', 'json', audio_file],
-            capture_output=True, text=True, check=True, timeout=30
-        )
-        for s in _patch_json.loads(r.stdout).get('streams', []):
-            d = s.get('duration')
-            if d is not None:
-                return float(d) * 1000
-    except Exception as e:
-        print(f'[patch] ffprobe stream.duration falhou: {e}')
 
     # Tentativa 3 (último recurso): decode com ffmpeg + parse "Duration:" do stderr
     try:
@@ -73,9 +60,4 @@ def _safe_get_audio_duration(audio_file):
     return 0
 
 
-# Sobrescreve no namespace do módulo. Como esse arquivo é appended DEPOIS do
-# handler.py original, nossa atribuição vence o `def get_audio_duration(...)`
-# original. O handler() chama get_audio_duration em runtime via lookup global,
-# pega nossa versão.
-get_audio_duration = _safe_get_audio_duration
-print('[patch] get_audio_duration sobrescrito com versão robusta')
+print('[patch] _safe_get_audio_duration_ms disponível no namespace global')
